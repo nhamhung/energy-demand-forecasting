@@ -1,0 +1,22 @@
+# Project data & generated artifacts (regenerable — see README for how to fetch/build)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+models/*.joblib
+!models/model.joblib
+
+# Quarto render output
+/report/report.html
+/report/report.pdf
+/report/report.tex
+/report/.quarto/
+/report/report_files/
+!/report/report.html
+!/report/report.pdf
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
