@@ -19,7 +19,7 @@ streamlit run app/streamlit_app.py
 2. Push to a public GitHub repository whose default branch is `main`.
 3. In Settings → Pages, select **GitHub Actions**.
 4. In Streamlit Community Cloud, deploy branch `main` with entrypoint `app/streamlit_app.py`.
-5. Configure Kaggle using either KAGGLE_API_TOKEN or a [kaggle] secrets section containing username and key.
+5. The bundled Kaggle-derived sample needs no secret. To use full data, set `USE_FULL_KAGGLE_DATA=true` and configure either `KAGGLE_API_TOKEN` or a `[kaggle]` secrets section containing username and key.
 6. Wait for CI and Pages, then record acceptance in `docs/DEPLOYMENT_ACCEPTANCE.md`.
 
 ## Required checks

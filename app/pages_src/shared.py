@@ -22,6 +22,11 @@ def _configure_kaggle_credentials() -> None:
     configured (falls back to `~/.kaggle/kaggle.json` if present, or to
     the manual-download error message if not).
     """
+    try:
+        if st.secrets.get("USE_FULL_KAGGLE_DATA"):
+            os.environ["USE_FULL_KAGGLE_DATA"] = "true"
+    except Exception:
+        pass
     if os.environ.get("KAGGLE_API_TOKEN") or (
         os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY")
     ):

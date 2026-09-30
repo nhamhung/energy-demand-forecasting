@@ -11,6 +11,7 @@ whatever is current then, not the exact snapshot this project's numbers
 were computed from.
 """
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -59,13 +60,19 @@ def _require_file(path: Path) -> Path:
     return path
 
 
+def using_sample_data() -> bool:
+    """Whether the bundled Kaggle-derived one-year sample is active."""
+    return config.SAMPLE_CSV.exists() and os.getenv("USE_FULL_KAGGLE_DATA", "").lower() not in {"1", "true", "yes"}
+
+
 def load_raw() -> pd.DataFrame:
     """Load the CSV exactly as published, only parsing the datetime
     column — no cleaning yet. Useful for demonstrating the DST/outage
     issues directly against the untouched data (see `config.py`'s
     docstring).
     """
-    df = pd.read_csv(_require_file(config.RAW_CSV))
+    path = config.SAMPLE_CSV if using_sample_data() else _require_file(config.RAW_CSV)
+    df = pd.read_csv(path)
     df[config.DATETIME_COL] = pd.to_datetime(df[config.DATETIME_COL])
     return df.sort_values(config.DATETIME_COL).reset_index(drop=True)
 
