@@ -53,6 +53,11 @@ plt.rcParams.update({
 })
 ```
 
+::: {.callout-tip}
+## Interactive application
+[Open the Streamlit app](https://energy-demand-forecasting.streamlit.app){target="_blank"}
+:::
+
 ## Introduction
 
 I built this project to predict hourly electricity demand

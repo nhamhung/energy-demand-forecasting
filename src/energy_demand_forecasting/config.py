@@ -46,10 +46,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DATA_RAW_DIR = PROJECT_ROOT / "data" / "raw"
+DATA_SAMPLE_DIR = PROJECT_ROOT / "data" / "sample"
 DATA_PROCESSED_DIR = PROJECT_ROOT / "data" / "processed"
 MODELS_DIR = PROJECT_ROOT / "models"
 
 RAW_CSV = DATA_RAW_DIR / "Romania_hourly.csv"
+SAMPLE_CSV = DATA_SAMPLE_DIR / "Romania_hourly_sample.csv.gz"
 MODEL_PATH = MODELS_DIR / "model.joblib"
 
 # --- Kaggle source ---------------------------------------------------------
