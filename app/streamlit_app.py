@@ -11,8 +11,10 @@ Or via Docker (from the project root):
 import streamlit as st
 
 from pages_src import feature_engineering, model_insights, overview, predict
+from theme import apply_theme
 
 st.set_page_config(page_title="Energy Demand Forecasting", page_icon="⚡", layout="wide")
+apply_theme()
 
 pages = [
     st.Page(predict.render, title="Predict", icon="🎯", url_path="predict", default=True),
