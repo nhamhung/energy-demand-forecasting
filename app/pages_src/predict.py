@@ -48,6 +48,12 @@ def _render_historical(X: pd.DataFrame, y: pd.Series, pipeline) -> None:
     error_pct = abs(predicted - actual) / actual
 
     st.subheader(f"{candidate:%A, %B %d, %Y — %H:%M}")
+    st.caption(
+        "The saved model was trained on every hour in the dataset, this one included, so "
+        "this comparison is in-sample and flatters it. For honest errors, see the "
+        "cross-validated scores on Model Insights, or the error-by-horizon chart in "
+        "Forecast forward mode."
+    )
     c1, c2, c3 = st.columns(3)
     c1.metric("Actual demand", f"{actual:,.0f} MW")
     c2.metric("Predicted demand", f"{predicted:,.0f} MW")
@@ -66,13 +72,20 @@ def _render_historical(X: pd.DataFrame, y: pd.Series, pipeline) -> None:
 @st.cache_data(show_spinner="Measuring how error changes with forecast horizon (first load only)...")
 def _error_by_horizon_sample():
     frame = shared.get_clean_frame()
-    pipeline = shared.get_pipeline()
     n = len(frame)
     # Anchors spread across the most recent 20% of the series, spaced apart,
     # each with a full 24h of real future data to check the forecast against.
+    holdout_start = frame.index[int(n * 0.8)]
     candidates = frame.index[int(n * 0.8) : n - config.MAX_FORECAST_HORIZON_HOURS - 1]
     step = max(len(candidates) // 30, 1)
     anchors = list(candidates[::step])[:30]
+    # The saved model was trained on every row, these hours included, so it
+    # would be scored on data it has already seen. Fit the same pipeline on
+    # the hours before the first anchor only, so this is a genuine
+    # out-of-sample test.
+    X, y = shared.get_features()
+    before = X.index < holdout_start
+    pipeline = model.train_pipeline(X[before], y[before])
     return model.forecast_error_by_horizon(pipeline, frame, anchors, max_horizon=config.MAX_FORECAST_HORIZON_HOURS)
 
 
@@ -116,6 +129,8 @@ def _render_forecast(frame: pd.DataFrame, pipeline) -> None:
         c1.metric(f"Predicted demand at +{horizon}h", f"{forecast.iloc[-1]:,.0f} MW")
         c2.metric("Actual demand (real data exists for this anchor)", f"{actual_future.iloc[-1]:,.0f} MW")
         c3.metric("Error at this horizon", f"{final_error:.1%}")
+        st.caption("The saved model has seen these past hours during training, so this error is "
+                   "optimistic; the error-by-horizon chart below uses a model that hasn't.")
     else:
         st.metric(f"Predicted demand at +{horizon}h", f"{forecast.iloc[-1]:,.0f} MW")
         st.caption("This anchor is close to the end of the data — no real future value to compare against yet.")
@@ -127,16 +142,30 @@ def _render_forecast(frame: pd.DataFrame, pipeline) -> None:
         chart_df["Actual (what really happened)"] = actual_future
     st.line_chart(chart_df)
 
-    st.subheader("Does error compound with a longer horizon?")
+    st.subheader("Does error compound with a longer horizon — and does the model beat doing nothing?")
     st.caption(
-        "Averaged across 30 sampled forecast-start points, each checked against real "
-        "future data. Recursive forecasting can compound error the further out it goes — "
+        "Averaged across 30 sampled forecast-start points in the most recent 20% of the "
+        "data, each checked against real future data, using a model trained only on the "
+        "hours before them (the saved model has seen every hour). Recursive forecasting "
+        "can compound error the further out it goes — "
         "here, capping the horizon at 24h keeps the lag and generation-mix features "
         "grounded in real data throughout, so only the rolling-window features ever read "
-        "back a prediction instead of a real value."
+        "back a prediction instead of a real value. Two no-model baselines are scored on "
+        "the same hours: \"repeat the last known value\" (persistence, hard to beat 1 hour "
+        "ahead but drifting away from the daily cycle after that) and \"same hour last "
+        "week\" (seasonal naive)."
     )
-    error_by_horizon = _error_by_horizon_sample()
-    st.line_chart(error_by_horizon.set_index("steps_ahead")["mape"])
+    error_by_horizon = _error_by_horizon_sample().set_index("steps_ahead")
+    st.line_chart(
+        error_by_horizon[["mape", "persistence_mape", "seasonal_naive_mape"]].rename(
+            columns={
+                "mape": "LightGBM (recursive)",
+                "persistence_mape": "Repeat last known value",
+                "seasonal_naive_mape": "Same hour last week",
+            }
+        )
+    )
+    st.caption("MAPE (as a fraction) at each step ahead; lower is better.")
 
 
 def render():

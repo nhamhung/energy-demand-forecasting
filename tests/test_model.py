@@ -35,6 +35,50 @@ def test_naive_seasonal_baseline_is_perfect_on_a_perfectly_periodic_series():
     assert scores["mae"] < 1e-9
 
 
+def test_persistence_baseline_uses_the_previous_hour():
+    import energy_demand_forecasting.config as config
+
+    frame = make_synthetic_frame(n_hours=500)
+    X, y = split_features_target(frame)
+    _, X_test, _, y_test = model.chronological_train_test_split(X, y, test_fraction=0.2)
+
+    scores = model.persistence_baseline(frame, y_test)
+    previous = frame[config.TARGET_COL].shift(1).loc[y_test.index]
+    assert np.isclose(scores["mae"], (y_test - previous).abs().mean())
+    # The very first test hour is scored against the last training hour, not dropped.
+    assert previous.notna().all()
+
+
+def test_persistence_baseline_is_perfect_on_a_constant_series():
+    import energy_demand_forecasting.config as config
+
+    frame = make_synthetic_frame(n_hours=500)
+    frame[config.TARGET_COL] = 5000.0
+    _, y = split_features_target(frame)
+
+    assert model.persistence_baseline(frame, y)["mae"] == 0.0
+
+
+def test_cross_validation_only_touches_the_rows_it_is_given():
+    frame = make_synthetic_frame(n_hours=800)
+    X, y = split_features_target(frame)
+    X_train, X_test, y_train, y_test = model.chronological_train_test_split(X, y, test_fraction=0.25)
+
+    folds = model.time_series_folds(X_train, cv=3)
+    touched = np.unique(np.concatenate([np.concatenate([tr, va]) for tr, va in folds]))
+    assert touched.max() < len(X_train)                         # positions within X_train only
+    assert X_train.index[folds[-1][1][-1]] == X_train.index[-1]  # last fold ends where training ends
+    assert X_train.index[-1] < X_test.index.min()               # ...strictly before the test period
+
+    # Scrambling the test period cannot change cross-validation on the training period.
+    scores = model.cross_validate_pipeline(X_train, y_train, estimator=model.linear_estimator(), cv=3)
+    X_scrambled, y_scrambled = X.copy(), y.copy()
+    X_scrambled.loc[X_test.index] = 0.0
+    y_scrambled.loc[y_test.index] = 1e9
+    X_train_2, _, y_train_2, _ = model.chronological_train_test_split(X_scrambled, y_scrambled, test_fraction=0.25)
+    assert model.cross_validate_pipeline(X_train_2, y_train_2, estimator=model.linear_estimator(), cv=3) == scores
+
+
 def test_cross_validate_pipeline_uses_time_series_split_and_returns_valid_scores():
     frame = make_synthetic_frame(n_hours=800)
     X, y = split_features_target(frame)
@@ -105,11 +149,31 @@ def test_recursive_forecast_exogenous_lags_stay_grounded_in_real_data():
     import energy_demand_forecasting.config as config
     frame = make_synthetic_frame(n_hours=500)
     anchor = frame.index[300]
+    fitted = model.train_pipeline(*split_features_target(frame), estimator=model.linear_estimator())
 
-    for h in range(1, 25):
-        t = anchor + pd.Timedelta(hours=h)
-        lookback = t - pd.Timedelta(hours=config.EXOGENOUS_LAG_HOURS)
-        assert lookback <= anchor  # always real, never a placeholder future row
+    seen_rows = []
+
+    class Recorder:
+        """Passes predictions through, keeping every feature row the forecast feeds the model."""
+
+        def predict(self, x):
+            seen_rows.append(x)
+            return fitted.predict(x)
+
+    forecast = model.recursive_forecast(Recorder(), frame, anchor, horizon_hours=24)
+
+    lag = config.EXOGENOUS_LAG_HOURS
+    for x in seen_rows:
+        t = x.index[0]
+        real = frame.loc[t - pd.Timedelta(hours=lag)]
+        for col in config.EXOGENOUS_COLS:
+            assert x[f"{col.replace(' ', '_')}_lag_{lag}h"].iloc[0] == real[col]
+        assert x[f"net_export_lag_{lag}h"].iloc[0] == real["Production"] - real[config.TARGET_COL]
+
+    # Nothing after the anchor may influence the forecast: scramble the future, same result.
+    poisoned = frame.copy()
+    poisoned.loc[poisoned.index > anchor] = poisoned.loc[poisoned.index > anchor] * 10 + 12345
+    pd.testing.assert_series_equal(model.recursive_forecast(fitted, poisoned, anchor, horizon_hours=24), forecast)
 
 
 def test_forecast_error_by_horizon_returns_one_row_per_step():
@@ -120,7 +184,17 @@ def test_forecast_error_by_horizon_returns_one_row_per_step():
     result = model.forecast_error_by_horizon(pipeline, frame, anchors, max_horizon=24)
 
     assert set(result["steps_ahead"]) == set(range(1, 25))
-    assert (result["mape"] >= 0).all()
+    assert (result[["mape", "persistence_mape", "seasonal_naive_mape"]] >= 0).all().all()
+
+    # Baselines use only what is known at the anchor: the last known value, and t - 168h.
+    import energy_demand_forecasting.config as config
+    c = frame[config.TARGET_COL]
+    H = pd.Timedelta(hours=1)
+    step_5 = result.set_index("steps_ahead").loc[5]
+    expected_persistence = np.mean([abs(c[a] - c[a + 5 * H]) / c[a + 5 * H] for a in anchors])
+    expected_seasonal = np.mean([abs(c[a + 5 * H - 168 * H] - c[a + 5 * H]) / c[a + 5 * H] for a in anchors])
+    assert np.isclose(step_5["persistence_mape"], expected_persistence)
+    assert np.isclose(step_5["seasonal_naive_mape"], expected_seasonal)
 
 
 def test_save_and_load_pipeline_roundtrip(tmp_path):

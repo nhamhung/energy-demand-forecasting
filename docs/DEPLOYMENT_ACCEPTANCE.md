@@ -6,7 +6,7 @@
 | Reviewer | |
 | Git SHA | |
 | Python version | |
-| Repository URL | https://github.com/nhamhhung/energy-demand-forecasting |
+| Repository URL | https://github.com/nhamhung/energy-demand-forecasting |
 | Pages URL | https://nhamhung.github.io/energy-demand-forecasting/ |
 | Streamlit URL | https://energy-demand-forecasting.streamlit.app |
 | `/_stcore/health` HTTP 200 | |

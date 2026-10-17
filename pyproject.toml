@@ -1,3 +1,44 @@
+[project]
+name = "energy-demand-forecasting"
+version = "1.0.0"
+description = "Hourly electricity demand forecasting for Romania's national grid"
+requires-python = ">=3.12,<3.13"
+# Exact versions the project was built and tested with (uv.lock pins everything else).
+dependencies = [
+    "pandas==3.0.6",
+    "numpy==2.5.3; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # Intel Macs: shap needs numba, and the newest numba with a ready-built Intel-Mac
+    # wheel (0.62) supports numpy only up to 2.3.
+    "numpy==2.3.5; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "scikit-learn==1.9.1",
+    "joblib==1.6.0",
+    "lightgbm==4.7.0",
+    "statsmodels==0.15.0",
+    "holidays==0.105",
+    "shap==0.52.0",
+    "matplotlib==3.11.2",
+    "plotly==7.1.0",
+    "streamlit==1.64.0",
+    "kaggle==2.2.4",
+    "jupyterlab==4.6.4",
+    "ipykernel==7.4.0",
+    # Unpacks the libomp fallback scripts/launch.py may fetch on macOS.
+    "backports-zstd==1.8.0; sys_platform == 'darwin'",
+]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "ruff==0.16.10"]
+
+[tool.uv]
+package = false  # a project folder, not an installable library
+# 26.x ships no ready-built wheel for Intel Macs; 25.x does (needed by JupyterLab).
+# numba (needed by shap): keep Intel Macs on 0.62, the newest with a ready-built wheel there,
+# instead of an ancient source-only release.
+constraint-dependencies = [
+    "argon2-cffi-bindings<26",
+    "numba>=0.62; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
@@ -8,4 +49,4 @@ select = ["E4", "E7", "E9", "F"]
 ignore = ["E501"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]

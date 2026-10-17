@@ -31,6 +31,14 @@ Verified directly against the real downloaded CSV (not assumed):
   reporting/scraping outages in whatever live feed this dataset's
   maintainer scrapes — not a DST artifact, and not present at all in
   2019-2023.
+- **A third issue: fabricated stretches in 2025-2026.** On some nights
+  (and a few afternoons) the feed reports every column as a scaled-up
+  copy of the hour before, so "demand" climbs to 10,000-12,000 MW
+  overnight (the dataset's maximum, 11,986 MW at 2025-11-27 06:00, is
+  one of them) and then falls back by thousands of MW within one hour;
+  "nuclear" output climbs to ~2,080 MW, beyond the plant's capacity.
+  `data.flag_implausible_readings` detects these and `data.clean_frame`
+  treats them like missing hours. See the constants below.
 - **The generation-mix columns (`Production` and its 7 source
   breakdowns) are recorded at the same hour as `Consumption`, not
   before it** — using them directly as features to predict that same
@@ -69,6 +77,40 @@ EXOGENOUS_COLS = ["Production", "Nuclear", "Wind", "Hydroelectric", "Oil and Gas
 RENEWABLE_COLS = ["Wind", "Hydroelectric", "Solar"]
 
 RANDOM_SEED = 42
+
+# --- Implausible-reading rule (see `data.flag_implausible_readings`) ------
+#
+# The live feed contains a few nights (2025-2026) where every column is a
+# scaled-up copy of the previous hour, climbing to 10,000-12,000 MW of
+# "demand" (and up to ~2,080 MW of "nuclear" output, well above Romania's
+# ~1,400 MW of installed nuclear capacity) before dropping back to normal
+# within one hour. The rule has two parts:
+#
+# 1. Trigger, either of:
+#    a. an hour whose Consumption is more than SPIKE_RATIO_THRESHOLD
+#       times the median of the same clock hour on the
+#       SPIKE_REFERENCE_DAYS days before and after it. Measured on the
+#       full snapshot, no hour in 2019-2024 exceeds 1.46 (and those were
+#       stale, flat-lined readings, not genuine demand), while the worst
+#       bad nights reach 1.5-2.0. Only the high side is checked: genuine
+#       holidays (Easter Monday 2025) legitimately fall below 0.5.
+#    b. a Nuclear reading above NUCLEAR_MAX_PLAUSIBLE_MW. Romania's only
+#       nuclear plant (Cernavoda, two ~700 MW units) cannot exceed
+#       ~1,400 MW, and no reading in 2019-2024 exceeds 1,457 MW, so a
+#       higher value can only come from a scaled-up copied row. This
+#       catches milder copies of the same fault that (a) misses, such as
+#       2026-02-11 22:00 (9,460 MW, then 6,254 MW an hour later).
+# 2. Extent: the flag spreads over the contiguous run of hours that are
+#    exact proportional copies of the hour before them (every column in
+#    COPY_CHECK_COLS changes by the same factor, within
+#    COPY_RATIO_TOLERANCE), because those hours are fabricated by the same
+#    feed fault even where they have not yet climbed past the trigger.
+SPIKE_REFERENCE_DAYS = 7
+SPIKE_MIN_REFERENCE_DAYS = 4  # need at least this many same-hour neighbours to judge an hour
+SPIKE_RATIO_THRESHOLD = 1.5
+NUCLEAR_MAX_PLAUSIBLE_MW = 1500
+COPY_CHECK_COLS = ["Consumption", "Production", "Nuclear", "Hydroelectric", "Oil and Gas", "Coal"]
+COPY_RATIO_TOLERANCE = 0.01
 
 # --- Modeling -------------------------------------------------------------
 LAG_HOURS = [24, 168]
