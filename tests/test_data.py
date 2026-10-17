@@ -81,7 +81,11 @@ def _inject_scaled_copy_night(df: pd.DataFrame, start: str, factors: list[float]
     numeric = [config.TARGET_COL] + config.EXOGENOUS_COLS
     pos = df.index[df[config.DATETIME_COL] == pd.Timestamp(start)][0]
     for i, factor in enumerate(factors):
-        df.loc[pos + i, numeric] = (df.loc[pos + i - 1, numeric] * factor).round().values
+        # Selecting one row from a mixed-type frame yields an object Series in
+        # pandas 2.x.  Cast the known numeric fields explicitly so this fixture
+        # behaves consistently across the pandas versions supported by CI.
+        previous = df.loc[pos + i - 1, numeric].astype(float)
+        df.loc[pos + i, numeric] = (previous * factor).round().to_numpy()
     return df
 
 
