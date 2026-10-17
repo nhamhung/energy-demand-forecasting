@@ -1,5 +1,8 @@
 # Energy Demand Forecasting
 
+> **New to Python, or just want to try it?** See [START_HERE.md](START_HERE.md): download the ZIP,
+> double-click `start_windows.bat` (Windows) or `start_mac.command` (macOS), and it sets everything up.
+
 A worked, end-to-end data science project forecasting hourly
 electricity demand (`Consumption`, megawatts) for Romania's national
 grid, using real, published data from 2019 onward together with its
@@ -42,7 +45,7 @@ Install once, before Setup below:
 
 | Deliverable | Where |
 |---|---|
-| A well-documented notebook building the model, applying good practices | `notebooks/01_eda_and_modeling.ipynb` |
+| A step-by-step guide notebook that walks a beginner through the data, every feature, the models, evaluation, recursive 24-hour forecasting, and SHAP, using the project's own `src/` functions | `notebooks/01_eda_and_modeling.ipynb` |
 | A multi-page Streamlit app to explore the data and try the model | `app/streamlit_app.py` + `app/pages_src/` (+ `app/Dockerfile`) |
 | A research-style writeup | `report/report.qmd` |
 | A script that trains and saves the production model | `scripts/train.py` |
@@ -110,7 +113,7 @@ advance, so a real system forecasting tomorrow's demand doesn't know
 tomorrow's actual generation mix either. Every generation-mix feature
 in `features.py` is lagged by 24 hours specifically to avoid this.
 
-## Two real data-quality issues, and they are not the same issue
+## Three real data-quality issues, and they are not the same issue
 
 - A **Daylight Saving Time** artifact (1 missing hour every spring, 1
   duplicated hour every autumn) — the same underlying cause as any
@@ -119,6 +122,18 @@ in `features.py` is lagged by 24 hours specifically to avoid this.
   2024-2025: multi-hour gaps up to 83 consecutive hours, consistent
   with a genuine reporting/scraping gap in the live feed this dataset's
   maintainer pulls from. Not present at all in 2019-2023.
+- **Fabricated readings in 2025-2026**: stretches of 2-14 hours where
+  every column is a scaled-up copy of the hour before, so night-time
+  "demand" climbs to 10,000-12,000 MW (the raw maximum, 11,986 MW at
+  2025-11-27 06:00, is one of them) and nuclear output to ~2,080 MW,
+  beyond the plant's capacity, before dropping back within an hour.
+  `data.flag_implausible_readings` catches them with a conservative,
+  documented rule (demand above 1.5x the same hour's median over the
+  surrounding ±7 days, or nuclear above 1,500 MW, neither of which ever
+  happens in 2019-2024; extended over the contiguous run of
+  proportional copies) and `clean_frame` interpolates them like gaps:
+  123 hours in 16 stretches on the full snapshot. Peak demand after
+  cleaning is 9,615 MW (19 January 2021).
 
 See `config.py`'s and `data.py`'s docstrings for the full detail and
 how each is fixed.
@@ -137,19 +152,47 @@ how each is fixed.
   tested via ablation, and found to add nothing once fixed. An honest
   negative result, reported rather than dropped quietly.
 
-## A model chosen after clearing a real baseline — including against a neural network
+## Two baselines, and an honest answer about what the model adds
 
-`LightGBM` beats Linear Regression, Random Forest, and a lightweight
-`MLPRegressor` neural-network baseline on every metric, and clears the
-naive seasonal baseline (~7.8% MAPE) by a wide margin. See
-`report/report.qmd`'s Methodology section for the full comparison.
+Numbers below are on the full snapshot after cleaning; cross-validation
+is a 5-fold `TimeSeriesSplit` on the **training period only**, so it is
+independent of the chronological test period (last 15% of hours,
+February 2025 to March 2026).
+
+| 1 hour ahead | CV MAPE (training period) | Test MAPE | Test MAE |
+|---|---:|---:|---:|
+| LightGBM | 3.23% | 4.05% | 239 MW |
+| Random Forest | 3.28% | 4.66% | 272 MW |
+| Linear Regression | 3.82% | 4.85% | 291 MW |
+| MLP (neural network) | 7.94% | 4.42% | 259 MW |
+| Persistence ("same as the previous hour") | 3.29% | 3.94% | 244 MW |
+| Seasonal naive ("same hour last week") | 5.06% | 7.44% | 443 MW |
+
+- `LightGBM` is the best learned model, ahead of Linear Regression,
+  Random Forest and a lightweight `MLPRegressor` neural network (last
+  and very unstable in cross-validation), and every model beats the
+  seasonal naive baseline.
+- **One hour ahead it does not beat persistence**: on the test period
+  persistence has the lower MAPE and RMSE (314 vs 342 MW), LightGBM
+  only the lower MAE. Call it a tie with the simplest possible rule.
+- **The model's value is in multi-hour forecasting.** Forecasting 24
+  hours recursively from 410 anchors across the test period, with a
+  pipeline trained only on the training period, LightGBM averages
+  4.44% MAPE over the 24 steps (3.94% at 1 hour, 4.82% at 19-24 hours),
+  against 7.43% for "same hour last week" and 14.16% for "repeat the
+  last known value", which ties the model at step 1 but cannot follow
+  the daily cycle after that.
+
+See `report/report.qmd`'s Methodology and 24-hour sections for the full
+comparison.
 
 ## What this project deliberately doesn't do
 
 No weather data, a different climate/market structure than Vietnam
 (Romania's demand is winter-heating-dominant, likely the opposite shape
 from Vietnam's), and the 2024-2025 test-period numbers are partly
-measured against linearly-interpolated (not fully real) data.
+measured against linearly-interpolated (not fully real) data — the
+outage gaps and the removed fabricated stretches alike.
 `report/report.qmd`'s Discussion section covers what a real,
 Vietnam-specific version would need.
 
@@ -171,8 +214,20 @@ this project's numbers were computed from.
 ## Run the notebook
 
 ```bash
+python -m ipykernel install --user --name energy-demand-forecasting --display-name "Energy Demand Forecasting"  # once
 jupyter notebook notebooks/01_eda_and_modeling.ipynb
 ```
+
+The notebook is written as a guide for a junior developer: 13 numbered parts
+(setup and module map, the question, the data and its quirks, exploration,
+features recomputed by hand for one timestamp, an honest chronological split
+with leakage demonstrations, metrics and baselines, the models inside the
+`Pipeline`, evaluation, recursive multi-step forecasting, SHAP, using the saved
+model like the app, and a recap with exercises). Run it top to bottom on the
+`energy-demand-forecasting` kernel; it takes about 3 minutes. It uses
+`data/raw/Romania_hourly.csv` when present (falling back to the bundled sample
+otherwise), never downloads anything, and never writes to `models/`, `data/`,
+`app/` or `report/` — it only reads `models/model.joblib` in Part 11.
 
 ## Train from the command line
 
@@ -192,8 +247,10 @@ recursively feed its own predictions back in as inputs, with a chart
 showing whether error actually compounds with horizon length —
 **Dataset Overview** (including the generation mix and renewable-share
 trend), **Feature Engineering** (including the stationarity/
-autocorrelation checks), and **Model Insights** (naive baseline + model
-comparison + live SHAP).
+autocorrelation checks), and **Model Insights** (seasonal naive
++ persistence baselines, model comparison cross-validated on the
+training period, live SHAP). The Predict page's error-by-horizon chart
+also shows both baselines at every step ahead.
 
 ```bash
 streamlit run app/streamlit_app.py
@@ -260,7 +317,9 @@ Troubleshooting:
 PYTHONPATH=src:. pytest tests/
 ```
 
-These test the DST/outage cleaning logic, feature engineering
+These test the DST/outage cleaning logic, the implausible-reading rule
+(on synthetic scaled-copy nights), both baselines, that
+cross-validation only touches the rows it is given, feature engineering
 (including dedicated leakage checks for both the rolling-window and the
 generation-mix features, and the seasonal-lookup's no-lookahead
 property), and the chronological-split/model logic directly with
@@ -271,7 +330,8 @@ real data.
 
 The Streamlit app starts immediately from a bundled one-year (8,760-row) sample sourced from Kaggle. Set `USE_FULL_KAGGLE_DATA=true` to fetch and use the complete live dataset through the Kaggle API; configure either `KAGGLE_API_TOKEN` or a `[kaggle]` secrets section containing username and key.
 
-- Repository: <https://github.com/nhamhhung/energy-demand-forecasting>
+- Repository: <https://github.com/nhamhung/energy-demand-forecasting>
 - Report: <https://nhamhung.github.io/energy-demand-forecasting/>
+- Beginner's guide: <https://nhamhung.github.io/energy-demand-forecasting/beginners-guide.html>
 - Streamlit: <https://energy-demand-forecasting.streamlit.app>
 - Fork setup: [docs/SETUP_AND_DEPLOYMENT.md](docs/SETUP_AND_DEPLOYMENT.md)

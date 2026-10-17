@@ -3,7 +3,7 @@
 ## Local setup
 
 ```bash
-git clone https://github.com/nhamhhung/energy-demand-forecasting.git
+git clone https://github.com/nhamhung/energy-demand-forecasting.git
 cd energy-demand-forecasting
 python -m venv .venv
 source .venv/bin/activate

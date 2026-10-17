@@ -1,7 +1,7 @@
-repository_owner: nhamhhung
+repository_owner: nhamhung
 repository_name: energy-demand-forecasting
 default_branch: main
-pages_url: https://nhamhhung.github.io/energy-demand-forecasting/
+pages_url: https://nhamhung.github.io/energy-demand-forecasting/
 streamlit_url: https://energy-demand-forecasting.streamlit.app
 streamlit_entrypoint: app/streamlit_app.py
 streamlit_secrets:

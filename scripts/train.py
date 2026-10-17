@@ -5,7 +5,13 @@ Equivalent to the notebook's modeling steps, without the notebook.
 Default is `LightGBM` — verified directly (see the model sweep in the
 notebook/report) that it beats Linear Regression, Random Forest, and a
 neural network (`MLPRegressor`) on every metric (MAE, RMSE, MAPE) in a
-chronological holdout.
+chronological holdout. It does *not* clearly beat the simplest
+1-hour-ahead baseline ("same as the previous hour"); its advantage is
+in multi-hour forecasting, where that baseline isn't available — see
+the report's 24-hour comparison.
+
+Uses the full dataset when `USE_FULL_KAGGLE_DATA=true` (how the
+shipped model is trained), otherwise the bundled one-year sample.
 """
 
 import argparse

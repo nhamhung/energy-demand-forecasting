@@ -101,15 +101,49 @@ def regression_scores(y_true: pd.Series, y_pred: np.ndarray) -> dict:
 def naive_seasonal_baseline(X: pd.DataFrame, y: pd.Series) -> dict:
     """"This hour's demand will be about what it was at the same hour
     last week" — no model at all, just `lag_168h` used directly.
+
+    The fair "no-model" bar for forecasts up to a week ahead.
     """
     return regression_scores(y, X["lag_168h"])
 
 
+def persistence_baseline(frame: pd.DataFrame, y: pd.Series) -> dict:
+    """"This hour's demand will be what it was the hour before" — no
+    model at all, just demand at t-1 (from the clean hourly `frame`)
+    used directly.
+
+    This is the strongest no-model bar for a **1-hour-ahead** forecast,
+    which is what every model in this project makes when it is scored
+    on `X_test`: their `rolling_*_24h` features already include hour
+    t-1. It is not available beyond one hour ahead — for hour t+2 and
+    later, the last known value is older (see
+    `forecast_error_by_horizon`, which repeats the last known value
+    across the whole horizon instead).
+    """
+    previous_hour = frame[config.TARGET_COL].shift(1).reindex(y.index)
+    return regression_scores(y, previous_hour)
+
+
+def time_series_folds(X: pd.DataFrame, cv: int = 5) -> list[tuple[np.ndarray, np.ndarray]]:
+    """The `TimeSeriesSplit` (train, validation) positional index pairs
+    `cross_validate_pipeline` uses — every fold trains on an earlier
+    block and validates on the block right after it, **within the rows
+    of `X` only**."""
+    return list(TimeSeriesSplit(n_splits=cv).split(X))
+
+
 def cross_validate_pipeline(X: pd.DataFrame, y: pd.Series, estimator: BaseEstimator | None = None, cv: int = 5) -> dict:
-    """`TimeSeriesSplit`, never `KFold` — see the module docstring."""
-    splitter = TimeSeriesSplit(n_splits=cv)
+    """`TimeSeriesSplit`, never `KFold` — see the module docstring.
+
+    Only the rows passed in are ever used, so pass the **training
+    period** (`X_train`, `y_train` from `chronological_train_test_split`)
+    to keep cross-validation scores independent of the held-out test
+    period. Running it on all rows would make the last fold validate on
+    (most of) the test period, so the two scores would no longer be two
+    separate measurements.
+    """
     fold_scores = {"mae": [], "rmse": [], "mape": []}
-    for train_idx, val_idx in splitter.split(X):
+    for train_idx, val_idx in time_series_folds(X, cv):
         pipeline = build_pipeline(estimator)
         pipeline.fit(X.iloc[train_idx], y.iloc[train_idx])
         preds = pipeline.predict(X.iloc[val_idx])
@@ -120,6 +154,28 @@ def cross_validate_pipeline(X: pd.DataFrame, y: pd.Series, estimator: BaseEstima
         **{f"{k}_mean": np.mean(v) for k, v in fold_scores.items()},
         **{f"{k}_std": np.std(v) for k, v in fold_scores.items()},
     }
+
+
+def cross_validate_baselines(frame: pd.DataFrame, X: pd.DataFrame, y: pd.Series, cv: int = 5) -> dict[str, dict]:
+    """Score both no-model baselines on exactly the validation blocks
+    `cross_validate_pipeline(X, y, cv=cv)` uses, so they can sit in the
+    same table as the models (same rows, same averaging). Returns
+    `{baseline name: {mae_mean, ..., mape_std}}`."""
+    predictions = {
+        "Persistence (previous hour)": frame[config.TARGET_COL].shift(1).reindex(y.index),
+        "Seasonal naive (same hour last week)": X["lag_168h"],
+    }
+    results = {}
+    for name, pred in predictions.items():
+        fold_scores = {"mae": [], "rmse": [], "mape": []}
+        for _, val_idx in time_series_folds(X, cv):
+            for key, value in regression_scores(y.iloc[val_idx], pred.iloc[val_idx]).items():
+                fold_scores[key].append(value)
+        results[name] = {
+            **{f"{k}_mean": np.mean(v) for k, v in fold_scores.items()},
+            **{f"{k}_std": np.std(v) for k, v in fold_scores.items()},
+        }
+    return results
 
 
 def train_pipeline(X: pd.DataFrame, y: pd.Series, estimator: BaseEstimator | None = None) -> Pipeline:
@@ -231,20 +287,41 @@ def forecast_error_by_horizon(
     averaged across the whole horizon — this is what actually shows
     whether/how much error compounds as the forecast reaches further
     into the future, which a single aggregate number would hide.
+
+    Two no-model baselines are scored on exactly the same target hours,
+    using only information available at the anchor:
+
+    - `persistence_mape`: "every future hour equals the last known
+      value" (demand at the anchor) — persistence stretched over the
+      horizon, since the previous hour is only known for step 1.
+    - `seasonal_naive_mape`: "same hour last week" (t - 168h, always at
+      or before the anchor within the 24h cap).
+
+    For an honest comparison, `pipeline` must not have been trained on
+    the hours being forecast (e.g. fit it on the training period and
+    pick anchors in the test period) — never the saved all-data model.
     """
-    errors_by_step: dict[int, list[float]] = {h: [] for h in range(1, max_horizon + 1)}
+    target = frame[config.TARGET_COL]
+    methods = ("mape", "persistence_mape", "seasonal_naive_mape")
+    errors_by_step: dict[int, dict[str, list[float]]] = {
+        h: {m: [] for m in methods} for h in range(1, max_horizon + 1)
+    }
     for anchor in anchors:
         last_needed = anchor + pd.Timedelta(hours=max_horizon)
         if last_needed not in frame.index:
             continue  # no real ground truth to compare against this far out
         forecast = recursive_forecast(pipeline, frame, anchor, max_horizon, seasonal_lookup=seasonal_lookup)
-        actual = frame.loc[forecast.index, config.TARGET_COL]
+        actual = target.loc[forecast.index]
+        last_known = target.loc[anchor]
         for h, (t, predicted) in enumerate(forecast.items(), start=1):
-            errors_by_step[h].append(abs(predicted - actual.loc[t]) / actual.loc[t])
+            a = actual.loc[t]
+            errors_by_step[h]["mape"].append(abs(predicted - a) / a)
+            errors_by_step[h]["persistence_mape"].append(abs(last_known - a) / a)
+            errors_by_step[h]["seasonal_naive_mape"].append(abs(target.loc[t - pd.Timedelta(hours=168)] - a) / a)
 
     rows = [
-        {"steps_ahead": h, "mape": np.mean(errs), "n_anchors": len(errs)}
+        {"steps_ahead": h, **{m: np.mean(errs[m]) for m in methods}, "n_anchors": len(errs["mape"])}
         for h, errs in errors_by_step.items()
-        if errs
+        if errs["mape"]
     ]
     return pd.DataFrame(rows)

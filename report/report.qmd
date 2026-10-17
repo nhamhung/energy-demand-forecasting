@@ -34,8 +34,11 @@ jupyter: energy-demand-forecasting
 ```{python}
 #| echo: false
 #| output: false
+import os
 import sys
 sys.path.insert(0, "../src")
+# The report's numbers describe the full dataset, not the app's one-year sample.
+os.environ.setdefault("USE_FULL_KAGGLE_DATA", "true")
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -98,13 +101,15 @@ df = data.load_raw()
 print(f"{len(df)} rows, {df[config.DATETIME_COL].min()} to {df[config.DATETIME_COL].max()}")
 ```
 
-### Two real data-quality issues — and they are not the same issue
+### Three real data-quality issues — and they are not the same issue
 
 ```{python}
 dupes = df[df[config.DATETIME_COL].duplicated(keep=False)]
 full_range = pd.date_range(df[config.DATETIME_COL].min(), df[config.DATETIME_COL].max(), freq="h")
 missing = full_range.difference(df[config.DATETIME_COL])
-print(f"{len(dupes)} duplicate timestamps, {len(missing)} missing timestamps")
+n_extra = df[config.DATETIME_COL].duplicated().sum()
+print(f"{dupes[config.DATETIME_COL].nunique()} timestamps appear more than once "
+      f"({len(dupes)} rows, i.e. {n_extra} extra copies); {len(missing)} missing timestamps")
 
 gaps = data.gap_lengths(df)
 print(f"{len(gaps)} separate gaps, longest: {gaps.max()} hours")
@@ -125,9 +130,81 @@ regular hourly index), but want to be upfront that interpolating an
 DST gaps — there's no way to recover 83 hours of real demand swings
 from a straight line between two endpoints.
 
+#### A third issue: fabricated readings in 2025-2026
+
+The largest `Consumption` values in the raw file are not cold snaps.
+They sit in the middle of the night, climb hour after hour to
+10,000-12,000 MW (the raw maximum is 11,986 MW at 06:00 on 27 November
+2025), and then fall back by thousands of MW within a single hour.
+Checking every column at those hours shows what is going on: each row
+is an **exact scaled-up copy of the row before it** — `Production`,
+`Nuclear`, `Hydroelectric`, `Oil and Gas`, `Coal` and `Consumption` all
+change by the same factor, hour after hour. Real hours never do that:
+nuclear output is nearly constant while demand moves, and here it
+climbs to about 2,080 MW, well beyond what Romania's only nuclear plant
+(Cernavoda, two ~700 MW units) can produce. It looks like a fault in
+the live feed that fills hours by rescaling the last real reading.
+
+`data.flag_implausible_readings` (called inside `clean_frame`) removes
+these with a deliberately conservative, documented rule (constants in
+`config.py`):
+
+1. **Trigger** — an hour is clearly impossible if `Consumption` is more
+   than 1.5x the median of the same clock hour over the surrounding
+   ±7 days, *or* `Nuclear` exceeds 1,500 MW. Neither ever happens in
+   2019-2024 (the highest ratio there is 1.46, the highest nuclear
+   reading 1,457 MW). Unusually *low* hours are never flagged: real
+   holidays fall below half the usual level.
+2. **Extent** — the flag spreads over the contiguous run of hours that
+   are exact proportional copies of the hour before (all six columns
+   above changing by the same factor, within 1%), since the whole run is
+   produced by the same fault. The genuine hour being copied is kept.
+
+Flagged hours are set to missing in every column and interpolated like
+the gaps above.
+
+```{python}
+flagged = data.implausible_readings(df)
+stretch_id = (flagged.index.to_series().diff() != pd.Timedelta(hours=1)).cumsum()
+stretches = flagged.groupby(stretch_id.values).agg(
+    start=("Consumption", lambda s: s.index.min()),
+    end=("Consumption", lambda s: s.index.max()),
+    hours=("Consumption", "size"),
+    max_consumption_MW=("Consumption", "max"),
+    max_ratio_to_usual=("ratio", "max"),
+    max_nuclear_MW=("Nuclear", "max"),
+).reset_index(drop=True)
+print(f"{len(flagged)} hours flagged, in {len(stretches)} separate stretches, "
+      f"all between {flagged.index.min():%Y-%m-%d} and {flagged.index.max():%Y-%m-%d}")
+stretches.round(2)
+```
+
+The six stretches that reach 1.5x the usual level contain every one of
+the dataset's 10,000-12,000 MW "peaks"; the others are milder
+copies of the same fault, caught because their nuclear reading is
+physically impossible. The complete list of flagged hours:
+
+::: {.callout-note collapse="true"}
+## All flagged hours (raw values, with the same-hour median they were judged against)
+
+```{python}
+#| echo: false
+with pd.option_context("display.max_rows", None):
+    print(flagged.round(2).to_string())
+```
+:::
+
+This is not a perfect fix. Interpolating a 9-14 hour overnight stretch
+with a straight line misses the real night-time dip, and milder copies
+that trip neither trigger (as well as some older stretches where the
+feed simply repeated one reading for several hours) are left as they
+are; the rule only removes values that are clearly impossible.
+
 ```{python}
 frame = data.load_clean_frame()
 print(f"{len(frame)} hours, strictly regular: {(frame.index.to_series().diff().dropna() == pd.Timedelta(hours=1)).all()}")
+print(f"Peak demand after cleaning: {frame[config.TARGET_COL].max():,.0f} MW "
+      f"at {frame[config.TARGET_COL].idxmax()} (raw maximum: {df[config.TARGET_COL].max():,.0f} MW)")
 ```
 
 ### Exploring the series and its generation mix
@@ -180,7 +257,7 @@ plt.show()
 The clearest "genuinely useful and interesting" finding from having the
 generation-mix breakdown at all: renewable share has held around
 40-48% of production every year since 2019, but **mean solar output
-roughly doubled between 2023 (~168 MW) and 2025 (~319 MW)** — a real,
+roughly doubled between 2023 (~168 MW) and 2025 (~320 MW)** — a real,
 checkable signature of Romania's recent solar buildout.
 
 ## Statistical rigor before modeling
@@ -215,7 +292,7 @@ for lag in [1, 24, 48, 168]:
     print(f"ACF at lag {lag}h: {acf_values[lag]:.4f}")
 ```
 
-Autocorrelation is genuinely high at both 24h (0.83) and 168h (0.87 —
+Autocorrelation is genuinely high at both 24h (0.83) and 168h (0.88 —
 if anything slightly stronger), with a noticeably weaker mid-point at
 48h (0.70) — empirical justification for these two specific lags,
 rather than picking them by convention.
@@ -282,57 +359,131 @@ Lag and rolling-window features are built from each row's own recent
 past, so a random shuffle would leak near-future information into
 training rows sitting next to shuffled-in test rows. The split is by
 position along the time-sorted index (last 15% of hours as test), and
-cross-validation uses `TimeSeriesSplit`, never `KFold`.
+cross-validation uses `TimeSeriesSplit`, never `KFold` — run on the
+**training period only**, so cross-validation and the final test are
+two independent measurements.
 
-### A naive baseline, measured before trusting any model
+### Two baselines, measured before trusting any model
+
+What each model is actually asked to do matters here. Scored on
+`X_test`, every model makes a **1-hour-ahead** forecast: its
+`rolling_*_24h` features already include the hour just before the one
+being predicted. The honest no-model bar for that job is
+**persistence** — "demand will be what it was an hour ago". The
+"same hour last week" **seasonal naive** baseline is the fair bar for
+forecasts further ahead, where the previous hour isn't known yet.
 
 ```{python}
-baseline_scores = model.naive_seasonal_baseline(X_test_wo, y_test_wo)
-print({k: round(v, 4) for k, v in baseline_scores.items()})
+baselines = pd.DataFrame({
+    "Persistence (previous hour)": model.persistence_baseline(frame, y_test_wo),
+    "Seasonal naive (same hour last week)": model.naive_seasonal_baseline(X_test_wo, y_test_wo),
+}).T
+baseline_scores = baselines.loc["Seasonal naive (same hour last week)"]
+persistence_scores = baselines.loc["Persistence (previous hour)"]
+baselines.round(4)
 ```
 
-"Same hour last week" is off by **~7.8%** on average (MAPE) — note this
-test period includes some of the messy, interpolated 2024-2025 outage
-stretches, so this baseline is measured under harder conditions than
-2019-2023 alone would give.
+On the test period, "same hour last week" is off by
+**`{python} f"{baseline_scores['mape']:.1%}"`** on average (MAPE), but
+simply repeating the previous hour is off by only
+**`{python} f"{persistence_scores['mape']:.1%}"`**. Persistence is the bar
+the 1-hour-ahead models have to clear.
 
-### Model comparison, via TimeSeriesSplit
+### Model comparison, via TimeSeriesSplit on the training period
 
 ```{python}
+X_train_cv, y_train_cv = X_train_wo, y_train_wo
+for i, (tr, va) in enumerate(model.time_series_folds(X_train_cv, cv=5), start=1):
+    print(f"fold {i}: train {X_train_cv.index[tr[0]]:%Y-%m-%d} to {X_train_cv.index[tr[-1]]:%Y-%m-%d}, "
+          f"validate {X_train_cv.index[va[0]]:%Y-%m-%d} to {X_train_cv.index[va[-1]]:%Y-%m-%d}")
+print(f"test period starts {X_test_wo.index.min()}")
+
 cv_results = []
 for name, factory in model.MODEL_FACTORIES.items():
-    scores = model.cross_validate_pipeline(X_without, y_without, estimator=factory(), cv=5)
+    scores = model.cross_validate_pipeline(X_train_cv, y_train_cv, estimator=factory(), cv=5)
+    cv_results.append({"model": name, **scores})
+for name, scores in model.cross_validate_baselines(frame, X_train_cv, y_train_cv, cv=5).items():
     cv_results.append({"model": name, **scores})
 cv_df = pd.DataFrame(cv_results).sort_values("mape_mean")
 cv_df[["model", "mae_mean", "rmse_mean", "mape_mean", "mape_std"]]
 ```
 
 ```{python}
-fig, ax = plt.subplots(figsize=(6, 3.2))
-ax.barh(cv_df["model"], cv_df["mape_mean"], color=PALETTE[0])
-ax.axvline(baseline_scores["mape"], linestyle="--", color="gray", label="naive baseline")
-ax.set_xlabel("MAPE (5-fold TimeSeriesSplit mean)")
-ax.legend()
+cv_idx = cv_df.set_index("model")
+is_baseline = cv_df["model"].isin(baselines.index)
+fig, ax = plt.subplots(figsize=(6.5, 3.4))
+ax.barh(cv_df["model"], cv_df["mape_mean"], color=[PALETTE[3] if b else PALETTE[0] for b in is_baseline])
+ax.set_xlabel("MAPE (5-fold TimeSeriesSplit mean, training period; orange = baseline)")
 plt.gca().invert_yaxis()
 plt.show()
 ```
 
-Every model clears the naive baseline by a wide margin, and **LightGBM
-wins clearly** — including against `MLP (neural network)`, a
-lightweight feedforward net (`sklearn.neural_network.MLPRegressor`,
-zero new dependencies) included specifically to test whether a neural
-approach earns its extra complexity here. It lands close to Random
-Forest, but neither catches LightGBM — a useful, concrete data point
-against reaching for a neural network on a tabular, feature-engineered
-version of this kind of problem.
+**LightGBM is the best learned model**
+(`{python} f"{cv_idx.loc['LightGBM', 'mape_mean']:.2%}"` mean MAPE), ahead
+of Random Forest (`{python} f"{cv_idx.loc['Random Forest', 'mape_mean']:.2%}"`)
+and Linear Regression (`{python} f"{cv_idx.loc['Linear Regression', 'mape_mean']:.2%}"`),
+and every model except the neural network clears the seasonal naive
+baseline (`{python} f"{cv_idx.loc['Seasonal naive (same hour last week)', 'mape_mean']:.2%}"`)
+comfortably. `MLP (neural network)` — a lightweight feedforward net
+(`sklearn.neural_network.MLPRegressor`, zero new dependencies) included
+specifically to test whether a neural approach earns its extra
+complexity — doesn't: it finishes last
+(`{python} f"{cv_idx.loc['MLP (neural network)', 'mape_mean']:.2%}"`) with by far the
+largest fold-to-fold spread (`mape_std`
+`{python} f"{cv_idx.loc['MLP (neural network)', 'mape_std']:.2%}"`).
+
+The more sobering comparison is with **persistence**
+(`{python} f"{cv_idx.loc['Persistence (previous hour)', 'mape_mean']:.2%}"`): at one
+hour ahead, the best model is only marginally better than repeating the
+previous hour on these folds.
 
 ## Final chronological holdout
 
 ```{python}
-final_pipeline = model.train_pipeline(X_train_wo, y_train_wo, estimator=model.lightgbm_estimator())
+holdout_rows = {}
+for name, factory in model.MODEL_FACTORIES.items():
+    pipe = model.train_pipeline(X_train_wo, y_train_wo, estimator=factory())
+    holdout_rows[name] = model.regression_scores(y_test_wo, pipe.predict(X_test_wo))
+    if name == "LightGBM":
+        final_pipeline = pipe
+holdout = pd.concat([pd.DataFrame(holdout_rows).T, baselines]).sort_values("mape")
 test_preds = final_pipeline.predict(X_test_wo)
-print({k: round(v, 4) for k, v in model.regression_scores(y_test_wo, test_preds).items()})
+holdout.round(4)
 ```
+
+On the untouched test period (February 2025 to March 2026), LightGBM is
+again the best of the four learned models (MAPE
+`{python} f"{holdout.loc['LightGBM', 'mape']:.2%}"`, MAE
+`{python} f"{holdout.loc['LightGBM', 'mae']:.0f}"` MW), and every model
+beats the seasonal naive baseline by a wide margin. But **it does not
+beat persistence one hour ahead**: repeating the previous hour scores
+`{python} f"{holdout.loc['Persistence (previous hour)', 'mape']:.2%}"` MAPE and
+`{python} f"{holdout.loc['Persistence (previous hour)', 'rmse']:.0f}"` MW RMSE against
+LightGBM's `{python} f"{holdout.loc['LightGBM', 'mape']:.2%}"` and
+`{python} f"{holdout.loc['LightGBM', 'rmse']:.0f}"` MW, with LightGBM ahead only on MAE
+(`{python} f"{holdout.loc['LightGBM', 'mae']:.0f}"` vs
+`{python} f"{holdout.loc['Persistence (previous hour)', 'mae']:.0f}"` MW). For a 1-hour-ahead
+forecast, the honest summary is a tie with the simplest possible rule.
+Demand changes slowly from one hour to the next, and the models only see
+the previous hour diluted inside a 24-hour rolling mean.
+
+One caveat cuts the other way. Interpolated hours (the outage gaps and
+the removed fabricated stretches) are straight lines, which are
+trivially easy for persistence and hard for the model, so scoring only
+the real, non-interpolated test hours is a useful check:
+
+```{python}
+filled = ~y_test_wo.index.isin(df[config.DATETIME_COL]) | y_test_wo.index.isin(flagged.index)
+real = ~filled
+pd.DataFrame({
+    "LightGBM": model.regression_scores(y_test_wo[real], test_preds[real]),
+    "Persistence (previous hour)": model.persistence_baseline(frame, y_test_wo[real]),
+    "Seasonal naive (same hour last week)": model.naive_seasonal_baseline(X_test_wo[real], y_test_wo[real]),
+}).T.round(4).assign(hours=int(real.sum()))
+```
+
+On the real hours alone LightGBM edges ahead on MAPE and MAE but stays
+behind on RMSE — the verdict for one hour ahead is still a tie.
 
 ```{python}
 fig, ax = plt.subplots(figsize=(9, 3.2))
@@ -343,6 +494,60 @@ ax.set_ylabel("MW")
 ax.legend()
 plt.show()
 ```
+
+## Forecasting 24 hours ahead: where the model earns its keep
+
+A grid operator needs the next day, not just the next hour. For hour
+*t+2* and later the previous hour isn't known yet, so persistence can
+only repeat the **last known** value, while the model forecasts
+recursively (`model.recursive_forecast`: predict one hour, feed the
+prediction back in, up to 24 hours; within that cap `lag_24h`,
+`lag_168h` and all generation-mix features stay real data). For a fair
+comparison, the LightGBM pipeline below is trained **only on the
+training period** (never the saved all-data model), and forecasts 24
+hours from an anchor every 23 hours across the whole test period (so
+anchors cycle through every hour of the day), scored per step ahead
+against "repeat the last known value" and "same hour last week".
+
+```{python}
+from energy_demand_forecasting import config
+
+candidates = y_test_wo.index[: -(config.MAX_FORECAST_HORIZON_HOURS + 1)]
+anchors = list(candidates[::23])
+horizon = model.forecast_error_by_horizon(final_pipeline, frame, anchors).set_index("steps_ahead")
+horizon_labels = {"mape": "LightGBM (recursive)", "persistence_mape": "Repeat last known value",
+                  "seasonal_naive_mape": "Same hour last week"}
+
+fig, ax = plt.subplots(figsize=(8, 3.4))
+for col, color in zip(horizon_labels, [PALETTE[0], PALETTE[3], PALETTE[4]]):
+    (horizon[col] * 100).plot(ax=ax, marker=".", color=color, label=horizon_labels[col])
+ax.set_xlabel("hours ahead")
+ax.set_ylabel("MAPE (%)")
+ax.legend()
+plt.show()
+
+blocks = {"1 h": slice(1, 1), "2-6 h": slice(2, 6), "7-12 h": slice(7, 12),
+          "13-18 h": slice(13, 18), "19-24 h": slice(19, 24), "all 24 h": slice(1, 24)}
+horizon_summary = pd.DataFrame({k: horizon.loc[v, list(horizon_labels)].mean() for k, v in blocks.items()}).rename(index=horizon_labels)
+print(f"{len(anchors)} anchors, {horizon['n_anchors'].iloc[0]} scored at every step")
+(horizon_summary * 100).round(2)
+```
+
+This is where the model is worth having. At step 1 it ties persistence
+(`{python} f"{horizon.loc[1, 'mape']:.2%}"` vs
+`{python} f"{horizon.loc[1, 'persistence_mape']:.2%}"`), as in the holdout above. From
+step 2 on, repeating the last known value falls apart — it cannot follow
+the daily cycle, peaking at `{python} f"{horizon['persistence_mape'].max():.1%}"`
+and averaging `{python} f"{horizon['persistence_mape'].mean():.1%}"` over the 24 hours —
+and "same hour last week" stays around
+`{python} f"{horizon['seasonal_naive_mape'].mean():.1%}"`. The recursive forecast
+degrades only gently, from `{python} f"{horizon.loc[1, 'mape']:.1%}"` one hour ahead to
+`{python} f"{horizon.loc[19:24, 'mape'].mean():.1%}"` on average for 19-24 hours ahead,
+and averages `{python} f"{horizon['mape'].mean():.2%}"` over the full day. Over a
+24-hour horizon, the better of the two baselines (same hour last week)
+makes about
+`{python} f"{horizon['seasonal_naive_mape'].mean() / horizon['mape'].mean():.1f}"`
+times the model's error.
 
 ## Model interpretability
 
@@ -360,7 +565,8 @@ plt.show()
 
 `lag_168h` outranks `lag_24h` here, matching the ACF finding above where
 the weekly echo was slightly stronger. The genuine surprise:
-**`Solar_lag_24h` lands in the top 10**, ahead of `is_holiday`. I didn't
+**`Solar_lag_24h` lands in the top 10**, just behind `is_holiday` and
+ahead of every other generation-mix feature. I didn't
 expect yesterday's solar output to say much about today's demand
 directly — my best guess is that it's acting as an indirect proxy for
 season and weather, not that solar generation itself drives
@@ -376,7 +582,14 @@ this as more than a proxy effect.
 - **The 2024-2025 outage gaps are patched with a rough approximation.**
   An 83-hour linear interpolation can't recover real demand swings for
   that stretch — evaluation numbers touching that period are measured
-  on partly reconstructed, not fully real, data.
+  on partly reconstructed, not fully real, data. The same goes for the
+  fabricated 2025-2026 stretches the outlier rule removes: they are
+  interpolated too, and milder copies that trip neither trigger remain.
+- **One hour ahead, the model is no better than persistence.** The
+  value it adds is over a multi-hour horizon. A model aimed squarely at
+  the next hour would at least need the previous hour as its own
+  feature (`lag_1h`), at the cost of faster error compounding when used
+  recursively.
 - **No weather data** — the sharp winter-heating seasonality is only
   seen through the calendar, never an actual temperature reading.
 - **Different climate and market structure than Vietnam.** Romania's
@@ -397,8 +610,9 @@ Switching from a frozen US demand series to this live Romanian
 consumption-and-production dataset paid off in ways beyond just having
 more columns: it forced a genuine leakage-trap decision (lagging every
 generation-mix feature), surfaced a real, previously-unseen
-data-quality problem (multi-hour 2024-2025 outage gaps, structurally
-different from the DST issue), and gave two honest negative/surprising
+data-quality problems (multi-hour 2024-2025 outage gaps, structurally
+different from the DST issue, and fabricated scaled-copy readings that
+had produced the dataset's apparent 12,000 MW "peak"), and gave two honest negative/surprising
 results worth reporting on their own terms — the seasonal-decomposition
 feature added nothing once properly leakage-checked, and yesterday's
 solar output ranks surprisingly high in the final model's own
@@ -408,3 +622,9 @@ baseline held up on this dataset exactly as it did on the original US
 version — a second, independent piece of evidence that the highest
 common instinct ("try a neural net") isn't automatically the right one
 for a tabular, well-feature-engineered forecasting problem like this.
+The most important correction, though, came from adding the right
+baseline: one hour ahead, simply repeating the previous hour is as good
+as any model here, so the project's real claim is a narrower one — the
+model's value is in forecasting a whole day ahead, where it keeps its
+error at roughly 4-5% while the no-model alternatives sit at 7% or far
+worse.
